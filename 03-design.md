@@ -34,7 +34,7 @@
 
 ### 3.2.3 ThreadLocal-контекст
 
-Третья точка взаимодействия — `ThreadLocal`-переменные, используемые для передачи данных между методами одного потока без изменения сигнатур. В реализации одного из решений, рассматриваемых в §3.4, используются два контекста: `YtStreamingTransactionContext` (для идентификатора родительской транзакции) и `YtStreamingBatchContext` (для смещения конца батча и пути потребителя). Использование `ThreadLocal` оправдано тем, что обработка одного батча выполняется на драйвере в одном потоке, и контракт `MicroBatchExecution` гарантирует последовательное исполнение.
+Третья точка взаимодействия — `ThreadLocal`-переменные, используемые для передачи данных между методами одного потока без изменения сигнатур. В реализации одного из решений, рассматриваемых в §3.4, используется контекст `YtStreamingTransactionContext`, хранящий идентификатор родительской транзакции и адрес rpc-прокси, на которой была создана транзакция. Использование `ThreadLocal` оправдано тем, что обработка одного батча выполняется на драйвере в одном потоке, и контракт `MicroBatchExecution` гарантирует последовательное исполнение.
 
 ## 3.3 Соответствие партиций источника и приёмника
 
@@ -97,8 +97,8 @@ case class YtQueueRange(tabletIndex: Int, lowerIndex: Long, upperIndex: Long) ex
 
 Жизненный цикл батча в решении 2 выглядит следующим образом.
 
-1. На драйвере метод `Source.getBatch` формирует RDD из таблетов очереди и сохраняет смещение конца батча в `YtStreamingBatchContext`.
-2. На драйвере непосредственно перед `Sink.addBatch` открывается tablet-транзакция; её идентификатор и адрес обслуживающего rpc-прокси сохраняются в широковещательной переменной.
+1. На драйвере метод `Source.getBatch` формирует RDD из таблетов очереди.
+2. На драйвере непосредственно перед `Sink.addBatch` открывается tablet-транзакция; её идентификатор и адрес rpc-прокси, на которой она открыта, сохраняются в `YtStreamingTransactionContext`.
 3. Spark материализует RDD согласно пользовательскому плану и запускает `foreachPartition` со штатным числом партиций.
 4. На каждом исполнителе через `attachTransaction` создаётся локальный объект транзакции, в котором выполняется запись данных партиции операцией `modifyRows`.
 5. После завершения всех заданий записи драйвер выполняет `advanceConsumer` для каждого таблета очереди в той же транзакции.
@@ -107,7 +107,7 @@ case class YtQueueRange(tabletIndex: Int, lowerIndex: Long, upperIndex: Long) ex
 
 С точки зрения реализации решение 2 требует трёх компонентов, рассмотренных в §3.2: интерфейса `StreamingTransactionSupport`, регистрируемого через ServiceLoader, инструментации метода `MicroBatchExecution.runBatch` через Java-агент и пары `ThreadLocal`-контекстов для передачи идентификатора транзакции и параметров батча между методами драйвера. Дополнительно требуется расширение клиентской библиотеки YT функцией `attachTransaction`, что затрагивает соседний проект.
 
-Сильная сторона решения — сохранение параллелизма записи. Каждый исполнитель обрабатывает свою партицию на своих ядрах, в своей JVM, и сериализация выходных строк, формирование запросов `modifyRows` и заполнение сетевого канала к rpc-прокси выполняются параллельно на всех исполнителях. На пути к динамической таблице остаётся одно узкое место — общая rpc-прокси, через которую проходят все запросы транзакции, — но оно является серверным компонентом и при равных ресурсах кратно превосходит пропускную способность одного исполнителя.
+Сильная сторона решения — сохранение параллелизма записи. Каждый исполнитель обрабатывает свою партицию на своих ядрах, в своей JVM, и сериализация выходных строк, формирование запросов `modifyRows` и заполнение сетевого канала к rpc-прокси выполняются параллельно на всех исполнителях. На пути к динамической таблице остаётся одно узкое место — общая rpc-прокси, через которую проходят все запросы транзакции, — но оно является серверным компонентом и при равных ресурсах кратно превосходит пропускную способность одного исполнителя. Дополнительно, объём записи в рамках одной транзакции регулируется параметром `spark.yt.write.dynBatchSize`, который определяет количество строк, накапливаемых перед отправкой запроса `modifyRows`. Это позволяет балансировать между количеством запросов к rpc-прокси и размером каждого запроса, адаптируясь под характеристики сети и производительность прокси.
 
 Слабая сторона решения — повышенная сложность реализации и эксплуатации. Использование инструментации байт-кода Spark делает код чувствительным к смене минорных версий Spark и усложняет отладку: сбой в декорированном методе наблюдается как ошибка во внутреннем коде Spark, не имеющая прямого соответствия в исходных текстах SPYT. Расширение клиентской библиотеки YT функцией `attachTransaction` распространяет область изменений за пределы SPYT.
 
@@ -207,14 +207,14 @@ flowchart TB
 
 Перечень компонентов, затрагиваемых реализацией решения 2, и характер изменений приведён ниже.
 
-1. [`YtStreamingSource`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSource.scala) — в методе `getBatch` при включённом флаге `spark.yt.streaming.transactional` смещение конца батча и путь потребителя сохраняются в `YtStreamingBatchContext` для последующего использования драйвером в фазе фиксации; в методе `commit` при включённом флаге штатное продвижение смещения пропускается, поскольку оно выполнено в составе транзакции.
-2. [`YtStreamingSink`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSink.scala) — в методе `addBatch` при включённом флаге идентификатор открытой драйвером транзакции и адрес обслуживающего rpc-прокси извлекаются из `YtStreamingTransactionContext` и помещаются в широковещательную переменную; в замыкании `foreachPartition` создаётся локальный объект транзакции через `attachTransaction`, и запись `modifyRows` выполняется в этой транзакции вместо открытия собственной.
-3. [`YtQueueOffset`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtQueueOffset.scala) — добавляется метод `advanceWithParentTransaction`, продвигающий смещение потребителя в составе уже открытой транзакции; вызывается из реализации SPI на драйвере после успешного завершения всех заданий записи.
-4. `MicroBatchExecution.runBatch` (Apache Spark) — декорируется через механизм `spark-patch`. Декоратор перед вызовом оригинального метода открывает tablet-транзакцию и помещает её идентификатор в `YtStreamingTransactionContext`, после возврата из оригинального метода выполняет `advanceConsumer` и `commit` в той же транзакции, при исключении — `abort`. Оригинальное поведение `runBatch` сохраняется без изменений.
-5. Новый класс `YTsaurusStreamingTransactionSupport` (модуль `data-source-extended`) — реализация SPI `StreamingTransactionSupport`, регистрируемая в `META-INF/services/`. Инкапсулирует вызовы `createTransaction(sticky=true)`, `pingTransaction`, `commit`, `abort` и взаимодействие с `YtQueueOffset.advanceWithParentTransaction`.
-6. Новый интерфейс `StreamingTransactionSupport` (модуль `spark-adapter`) — контракт жизненного цикла распределённой транзакции с методами начальной и завершающей фаз батча.
-7. Новые `ThreadLocal`-контексты `YtStreamingTransactionContext` и `YtStreamingBatchContext` (модуль `spark-adapter`).
-8. Расширение клиентской библиотеки YT функцией `attachTransaction(transactionId, proxyAddress)` — изменение в соседнем проекте.
+1. [`YtStreamingSource`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSource.scala) — метод `getBatch` не изменяется; в методе `commit` при наличии активного контекста транзакции смещение потребителя продвигается в составе этой транзакции через `offsetProvider.advance(..., parentTransactionId)`; при отсутствии контекста и включённом флаге `spark.yt.streaming.transactional` метод завершается без действий (транзакция ещё не зафиксирована декоратором).
+2. [`YtStreamingSink`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSink.scala) — в методе `addBatch` идентификатор открытой драйвером транзакции и адрес rpc-прокси извлекаются из `YtStreamingTransactionContext` и доставляются на исполнители широковещательными переменными; в замыкании `foreachPartition` создаётся локальный объект транзакции через `attachTransaction`, и запись `modifyRows` выполняется в этой транзакции вместо открытия собственной.
+3. [`YtDynamicTableWriter`](data-source/src/main/scala/tech/ytsaurus/spyt/format/YtDynamicTableWriter.scala) — расширяется необязательным параметром `parentTransaction: Option[ApiServiceTransaction]`; при его наличии запросы `modifyRows` направляются в переданную транзакцию, а не открывают собственную.
+4. `MicroBatchExecution.runBatch` (Apache Spark) — декорируется через механизм `spark-patch`. Декоратор перед вызовом оригинального метода открывает tablet-транзакцию и помещает её идентификатор и адрес прокси в `YtStreamingTransactionContext`; после возврата из оригинального метода вызывает `commitOffsets`, который через `Source.commit` продвигает смещение потребителя в составе той же транзакции, после чего фиксирует транзакцию; при исключении — отменяет транзакцию и откатывает запись в commit-лог Spark. Оригинальное поведение `runBatch` сохраняется без изменений.
+5. Новый класс `YTsaurusStreamingTransactionSupport` (модуль `data-source-extended`) — реализация SPI `StreamingTransactionSupport`, регистрируемая в `META-INF/services/`. Инкапсулирует создание tablet-транзакции (`TransactionType.Tablet`, `sticky=true`), получение адреса rpc-прокси через рефлексию, а также операции `commit` и `abort`.
+6. Новый интерфейс `StreamingTransactionSupport` (модуль `spark-adapter`) — контракт жизненного цикла распределённой транзакции с методами `isTransactionalStreamingEnabled`, `createTransaction`, `setTransaction`, `clearTransactionId`, `isRecoveryNeeded`, `markRecoveryNeeded`, `clearRecoveryNeeded`.
+7. Новый `ThreadLocal`-контекст `YtStreamingTransactionContext` (модуль `data-source-extended`) — хранит `StreamingTxContext(txId, stickyAddress)` и флаг `recoveryNeededFlag`.
+8. Расширение `yt-wrapper` функцией `attachTransaction(transactionId)` — оборачивает операцию `AttachTransaction` клиентской библиотеки YT.
 
 ### 3.5.4 Поток управления при обработке батча
 
@@ -228,32 +228,31 @@ sequenceDiagram
     participant SINK as YtStreamingSink
     participant EX as Исполнитель
     participant PX as rpc-прокси
-    DEC->>SPI: beginBatch
-    SPI->>PX: createTransaction sticky=true
-    PX-->>SPI: transactionId
-    SPI->>SPI: store id in ThreadLocal
+    DEC->>SPI: createTransaction
+    SPI->>PX: startTransaction (TransactionType.Tablet)
+    PX-->>SPI: transactionId, proxyAddress
+    SPI->>SPI: setContext(txId, proxyAddress) in ThreadLocal
     DEC->>SRC: getBatch
-    SRC->>SRC: store offset, queuePath in ThreadLocal
     SRC-->>DEC: DataFrame
     DEC->>SINK: addBatch
-    SINK->>SPI: read txId, proxyAddress from ThreadLocal
-    SPI-->>SINK: txId, proxyAddress
-    SINK->>EX: foreachPartition with broadcast txId, proxyAddress
-    EX->>PX: attachTransaction txId, proxyAddress
+    SINK->>SINK: read txId, proxyAddress from ThreadLocal
+    SINK->>EX: foreachPartition (broadcast txId, proxyAddress)
+    EX->>PX: attachTransaction(txId)
     EX->>PX: modifyRows on attached transaction
     EX-->>SINK: success
-    DEC->>SPI: endBatch
-    SPI->>SRC: advanceConsumer in transaction
-    SRC->>PX: advanceConsumer in transaction
+    DEC->>DEC: commitOffsets(availableOffsets)
+    DEC->>SRC: commit(endOffset)
+    SRC->>PX: advanceConsumer in transaction (txId)
     PX-->>SRC: ok
-    SRC-->>SPI: ok
+    SRC-->>DEC: ok
+    DEC->>SPI: commit()
     SPI->>PX: commit transaction
     PX-->>SPI: ok
 ```
 
 **Рисунок 3.2 — Поток управления при штатной обработке батча в решении 2**
 
-Декоратор `runBatch` получает управление перед оригинальным методом и вызывает фазу `beginBatch` SPI, которая открывает tablet-транзакцию через rpc-прокси общего пула и сохраняет её идентификатор в `YtStreamingTransactionContext`. Оригинальный `runBatch` исполняется без изменений: вызывается `Source.getBatch`, формируется план, исполняется `Sink.addBatch`. На стороне источника параметры батча сохраняются в `YtStreamingBatchContext`. На стороне приёмника идентификатор транзакции и адрес обслуживающего rpc-прокси извлекаются из `YtStreamingTransactionContext` и доставляются на исполнители широковещательной переменной; в замыкании `foreachPartition` создаётся локальный объект транзакции через `attachTransaction`, и запись `modifyRows` выполняется в нём. После возврата из `runBatch` декоратор вызывает фазу `endBatch`, в которой драйвер делегирует `YtStreamingSource` продвижение смещения для каждого таблета очереди в той же транзакции, после чего фиксирует её. Стандартный вызов `Source.commit`, выполняемый Spark после `runBatch`, при включённом флаге пропускает действия по продвижению смещения.
+Декоратор `runBatch` получает управление перед оригинальным методом и вызывает `createTransaction` SPI, которая открывает tablet-транзакцию (`TransactionType.Tablet`) через rpc-прокси общего пула и сохраняет её идентификатор и адрес прокси в `YtStreamingTransactionContext`. Оригинальный `runBatch` исполняется без изменений: вызывается `Source.getBatch`, формируется план, исполняется `Sink.addBatch`. На стороне приёмника идентификатор транзакции и адрес rpc-прокси извлекаются из `YtStreamingTransactionContext` и доставляются на исполнители широковещательными переменными; в замыкании `foreachPartition` создаётся локальный объект транзакции через `attachTransaction`, и запись `modifyRows` выполняется в нём. После возврата из оригинального `runBatch` декоратор вызывает `commitOffsets`, который обходит все источники и вызывает `Source.commit(endOffset)`. В методе `YtStreamingSource.commit` при наличии активного контекста транзакции смещение потребителя продвигается в составе той же транзакции через `advanceConsumer`. Затем декоратор фиксирует транзакцию вызовом `commit()` на объекте `StreamingTransactionHandle`.
 
 ## 3.6 Протокол атомарной фиксации батча
 
