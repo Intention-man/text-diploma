@@ -51,38 +51,13 @@ object YtStreamingTransactionContext {
 
 Метод [`YtStreamingSource.commit`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSource.scala:112) реализует два режима работы в зависимости от наличия активного контекста транзакции.
 
-**Транзакционный режим** (контекст установлен декоратором): смещение потребителя продвигается в составе уже открытой транзакции. Метод читает `txId` и `stickyAddress` из `YtStreamingTransactionContext`, при наличии `stickyAddress` создаёт клиент, зафиксированный на конкретном rpc-прокси, и вызывает `offsetProvider.advance(..., parentTransactionId)`. Операция `advanceConsumer` выполняется в той же tablet-транзакции, что и запись данных на исполнителях.
+**Транзакционный режим** (контекст установлен декоратором): смещение потребителя продвигается в составе уже открытой транзакции. Метод читает `txId` и `stickyAddress` из `YtStreamingTransactionContext`, при наличии `stickyAddress` создаёт клиент, зафиксированный на конкретном rpc-прокси, и вызывает `offsetProvider.advance(..., parentTransactionId)`. Операция `advanceConsumer` выполняется в той же таблет-транзакции, что и запись данных на исполнителях.
 
 **Нетранзакционный режим с включённым флагом** (контекст отсутствует, но `spark.yt.streaming.transactional=true`): метод завершается без действий. Это состояние возникает при сбое батча до установки контекста — транзакция не была открыта, и продвигать смещение не нужно.
 
 **Нетранзакционный режим** (флаг выключен): штатное поведение — `offsetProvider.advance(..., None)` без транзакции.
 
-```scala
-override def commit(end: Offset): Unit = {
-  val txContext = YtStreamingTransactionContext.get
-
-  if (txContext.isEmpty) {
-    val transactionalEnabled = sqlContext.sparkSession.ytConf(Streaming.Transactional)
-    if (transactionalEnabled) {
-      return
-    }
-    offsetProvider.advance(consumerPath, YtQueueOffset(end), lastCommittedOffset, maxOffset, None)(yt)
-    return
-  }
-
-  val parentTransactionId = txContext.map(_.txId)
-  val stickyAddr = txContext.flatMap(_.stickyAddress)
-  val advanceClient: CompoundClient = stickyAddr match {
-    case Some(addr) =>
-      val conf = YtClientConfigurationConverter.ytClientConfiguration(...)
-      YtClientProvider.ytClientFixedProxy(conf, addr)
-    case None => yt
-  }
-
-  offsetProvider.advance(consumerPath, YtQueueOffset(end), lastCommittedOffset, maxOffset,
-    parentTransactionId)(advanceClient)
-}
-```
+Полный исходный код метода `commit` приведён в приложении А, листинг А.2.
 
 ## 4.4 Модификация потокового приёмника
 
@@ -143,53 +118,13 @@ private def commitBatch(): Unit = {
 
 Декоратор [`MicroBatchExecutionDecorators`](spark-adapter/impl/spark-3.2.2/bin/main/org/apache/spark/sql/execution/streaming/MicroBatchExecutionDecorators.scala:8) подменяет метод `runBatch` класса `MicroBatchExecution` через механизм инструментации байт-кода `spark-patch`. Аннотации `@Decorate` и `@OriginClass` указывают агенту целевой класс и метод для подмены; оригинальный метод остаётся доступным под именем `__runBatch`.
 
-Логика декоратора:
+Полный исходный код декоратора приведён в приложении А, листинг А.1.
 
-```scala
-@DecoratedMethod
-private def runBatch(sparkSessionToRunBatch: SparkSession): Unit = {
-  val sts = StreamingTransactionSupport.instance
-  val transactionalStreamingEnabled = sts.isTransactionalStreamingEnabled(sparkSessionToRunBatch)
-
-  if (!transactionalStreamingEnabled) {
-    __runBatch(sparkSessionToRunBatch)
-    return
-  }
-
-  if (sts.isRecoveryNeeded) {
-    logWarning("...")
-  }
-
-  val currentTransaction: StreamingTransactionHandle = sts.createTransaction(sparkSessionToRunBatch)
-  sts.setTransaction(currentTransaction)
-  val batchIdAtEntry = currentBatchId
-  var commitLogWritten = false
-
-  try {
-    __runBatch(sparkSessionToRunBatch)
-    commitLogWritten = true
-    MicroBatchExecutionDecorators.commitOffsets(availableOffsets)
-    currentTransaction.commit()
-    sts.clearRecoveryNeeded()
-  } catch {
-    case e: Exception =>
-      sts.markRecoveryNeeded()
-      try { currentTransaction.abort() } catch { case _: Throwable => () }
-      if (commitLogWritten) {
-        MicroBatchExecutionDecorators.deleteCommitLogEntry(commitLog, batchIdAtEntry)
-      }
-      throw e
-  } finally {
-    sts.clearTransactionId()
-  }
-}
-```
-
-При выключенном флаге декоратор прозрачно делегирует вызов оригинальному методу и не вносит накладных расходов.
+При выключенном флаге `spark.yt.streaming.transactional` декоратор прозрачно делегирует вызов оригинальному методу `__runBatch` и не вносит накладных расходов.
 
 При включённом флаге последовательность действий следующая.
 
-1. Через SPI создаётся tablet-транзакция; её идентификатор и адрес rpc-прокси сохраняются в `YtStreamingTransactionContext`.
+1. Через SPI создаётся таблет-транзакция; её идентификатор и адрес rpc-прокси сохраняются в `YtStreamingTransactionContext`.
 2. Вызывается оригинальный `__runBatch`, внутри которого Spark вызывает `Source.getBatch`, планирует и исполняет задания записи через `Sink.addBatch`.
 3. После успешного возврата из `__runBatch` декоратор вызывает `commitOffsets(availableOffsets)`, который обходит все источники и вызывает `source.commit(offset)`. В `YtStreamingSource.commit` смещение потребителя продвигается в составе открытой транзакции.
 4. Транзакция фиксируется вызовом `currentTransaction.commit()`.
@@ -249,21 +184,7 @@ object StreamingTransactionSupport {
 
 Класс [`YTsaurusStreamingTransactionSupport`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/adapter/YTsaurusStreamingTransactionSupport.scala:13) регистрируется в `META-INF/services/tech.ytsaurus.spyt.adapter.StreamingTransactionSupport`.
 
-Метод `createTransaction` создаёт tablet-транзакцию с параметром `sticky=true`, что соответствует `TransactionType.Tablet` в клиентской библиотеке YT:
-
-```scala
-override def createTransaction(sparkSession: SparkSession): StreamingTransactionHandle = {
-  val ytClient = YtClientProvider.ytClient(
-    YtClientConfigurationConverter.ytClientConfiguration(sparkSession.sparkContext.getConf)
-  )
-  val transaction = YtWrapper.createTransaction(
-    parent = None,
-    timeout = Duration.ofMinutes(5),
-    sticky = true
-  )(ytClient)
-  new YtStreamingTransactionHandle(transaction)
-}
-```
+Метод `createTransaction` создаёт таблет-транзакцию с параметром `sticky=true`, что соответствует `TransactionType.Tablet` в клиентской библиотеке YT. Полный исходный код метода приведён в приложении А, листинг А.3.
 
 Класс [`YtStreamingTransactionHandle`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/adapter/YTsaurusStreamingTransactionSupport.scala:49) оборачивает `ApiServiceTransaction`. Адрес rpc-прокси, на которой открыта транзакция, получается через рефлексию — метод `getRpcProxyAddress` не входит в публичный API `ApiServiceTransaction`, поэтому вызывается через `getDeclaredMethods` с `setAccessible(true)`. При недоступности метода (например, в будущих версиях клиентской библиотеки) возвращается `None`, и исполнители используют клиент из общего пула без фиксации на конкретном прокси.
 
