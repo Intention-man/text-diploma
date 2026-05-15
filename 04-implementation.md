@@ -6,19 +6,19 @@
 
 Реализация затрагивает пять модулей Gradle-проекта SPYT.
 
-**`data-source`** — базовый модуль записи в динамические таблицы. Изменение: класс [`YtDynamicTableWriter`](data-source/src/main/scala/tech/ytsaurus/spyt/format/YtDynamicTableWriter.scala:20) расширяется необязательным параметром родительской транзакции.
+**`data-source`** — базовый модуль записи в динамические таблицы. Изменение: класс `YtDynamicTableWriter` (листинг А.7) расширяется необязательным параметром родительской транзакции.
 
-**`data-source-extended`** — модуль потоковой обработки. Изменения: модификация [`YtStreamingSource.commit`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSource.scala:112) и [`YtStreamingSink.addBatch`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSink.scala:21); новые классы [`YtStreamingTransactionContext`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingTransactionContext.scala:7) и [`YTsaurusStreamingTransactionSupport`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/adapter/YTsaurusStreamingTransactionSupport.scala:13).
+**`data-source-extended`** — модуль потоковой обработки. Изменения: модификация `YtStreamingSource.commit` (листинг А.5) и `YtStreamingSink.addBatch` (листинг А.6); новые классы `YtStreamingTransactionContext` (листинг А.3) и `YTsaurusStreamingTransactionSupport` (листинг А.2).
 
-**`spark-adapter`** — модуль версионных адаптеров Spark. Изменение: новый интерфейс [`StreamingTransactionSupport`](spark-adapter/api/src/main/scala/tech/ytsaurus/spyt/adapter/StreamingTransactionSupport.scala:17) и вспомогательный трейт [`StreamingTransactionHandle`](spark-adapter/api/src/main/scala/tech/ytsaurus/spyt/adapter/StreamingTransactionSupport.scala:7) в модуле `api`.
+**`spark-adapter`** — модуль версионных адаптеров Spark. Изменение: новый трейт `StreamingTransactionSupport` и вспомогательный трейт `StreamingTransactionHandle` в модуле `api` (листинг А.1).
 
-**`spark-patch`** — модуль инструментации байт-кода. Изменение: новый декоратор [`MicroBatchExecutionDecorators`](spark-adapter/impl/spark-3.2.2/bin/main/org/apache/spark/sql/execution/streaming/MicroBatchExecutionDecorators.scala:8), размещённый в `spark-adapter/impl/spark-3.2.2` и применяемый ко всем поддерживаемым версиям Spark через механизм `@Decorate`.
+**`spark-patch`** — модуль инструментации байт-кода. Изменение: новый декоратор `MicroBatchExecutionDecorators` (листинг А.4), размещённый в `spark-adapter/impl/spark-3.5.0` и применяемый ко всем поддерживаемым версиям Spark через механизм `@Decorate`.
 
-**`yt-wrapper`** — модуль утилит для работы с YTsaurus. Изменение: метод [`attachTransaction`](yt-wrapper/src/main/scala/tech/ytsaurus/spyt/wrapper/transaction/YtTransactionUtils.scala:45) в трейте `YtTransactionUtils`, оборачивающий операцию `AttachTransaction` клиентской библиотеки YT.
+**`yt-wrapper`** — модуль утилит для работы с YTsaurus. Изменение: метод `attachTransaction` в трейте `YtTransactionUtils` (листинг А.8), оборачивающий операцию `AttachTransaction` клиентской библиотеки YT.
 
 ## 4.2 Контекст транзакции
 
-Передача идентификатора транзакции и адреса rpc-прокси между методами драйвера реализована через [`YtStreamingTransactionContext`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingTransactionContext.scala:7) — объект-синглтон, инкапсулирующий `InheritableThreadLocal`.
+Передача идентификатора транзакции и адреса rpc-прокси между методами драйвера реализована через `YtStreamingTransactionContext` (листинг А.3) — объект-синглтон, инкапсулирующий `InheritableThreadLocal`.
 
 Хранимый тип — `case class StreamingTxContext(txId: String, stickyAddress: Option[String])`. Использование `InheritableThreadLocal` вместо `ThreadLocal` обеспечивает видимость контекста в дочерних потоках, порождаемых Spark при планировании задач.
 
@@ -45,11 +45,11 @@ object YtStreamingTransactionContext {
 
 ### 4.3.1 Метод getBatch
 
-Метод [`YtStreamingSource.getBatch`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSource.scala:92) не изменяется. Он формирует `YtQueueRDD` по диапазонам смещений и возвращает `DataFrame`. Смещение конца батча (`end: Offset`) передаётся Spark-ом в метод `commit` стандартным механизмом и не требует дополнительного сохранения в ThreadLocal.
+Метод `YtStreamingSource.getBatch` (листинг А.5) не изменяется. Он формирует `YtQueueRDD` по диапазонам смещений и возвращает `DataFrame`. Смещение конца батча (`end: Offset`) передаётся Spark-ом в метод `commit` стандартным механизмом и не требует дополнительного сохранения в ThreadLocal.
 
 ### 4.3.2 Метод commit
 
-Метод [`YtStreamingSource.commit`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSource.scala:112) реализует два режима работы в зависимости от наличия активного контекста транзакции.
+Метод `YtStreamingSource.commit` реализует два режима работы в зависимости от наличия активного контекста транзакции.
 
 **Транзакционный режим** (контекст установлен декоратором): смещение потребителя продвигается в составе уже открытой транзакции. Метод читает `txId` и `stickyAddress` из `YtStreamingTransactionContext`, при наличии `stickyAddress` создаёт клиент, зафиксированный на конкретном rpc-прокси, и вызывает `offsetProvider.advance(..., parentTransactionId)`. Операция `advanceConsumer` выполняется в той же таблет-транзакции, что и запись данных на исполнителях.
 
@@ -57,11 +57,11 @@ object YtStreamingTransactionContext {
 
 **Нетранзакционный режим** (флаг выключен): штатное поведение — `offsetProvider.advance(..., None)` без транзакции.
 
-Полный исходный код метода `commit` приведён в приложении А, листинг А.2.
+Полный исходный код класса `YtStreamingSource` приведён в листинге А.5.
 
 ## 4.4 Модификация потокового приёмника
 
-Метод [`YtStreamingSink.addBatch`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/streaming/YtStreamingSink.scala:21) расширен поддержкой транзакционного режима. Изменения сосредоточены в двух местах: подготовка широковещательных переменных и создание клиента YTsaurus на исполнителе.
+Метод `YtStreamingSink.addBatch` (листинг А.6) расширен поддержкой транзакционного режима. Изменения сосредоточены в двух местах: подготовка широковещательных переменных и создание клиента YTsaurus на исполнителе.
 
 **На драйвере** метод читает `YtStreamingTransactionContext.get` и извлекает `txId` и `stickyAddress`. Оба значения упаковываются в широковещательные переменные `bcParentTransactionId` и `bcStickyProxyAddress`:
 
@@ -87,7 +87,7 @@ val dynamicTableWriter = new YtDynamicTableWriter(bcPath.value, bcSchema.value,
 
 ## 4.5 Расширение YtDynamicTableWriter
 
-Класс [`YtDynamicTableWriter`](data-source/src/main/scala/tech/ytsaurus/spyt/format/YtDynamicTableWriter.scala:20) расширен необязательным параметром `parentTransaction: Option[ApiServiceTransaction] = None`:
+Класс `YtDynamicTableWriter` (листинг А.7) расширен необязательным параметром `parentTransaction: Option[ApiServiceTransaction] = None`:
 
 ```scala
 class YtDynamicTableWriter(richPath: YPathEnriched, schema: StructType,
@@ -108,7 +108,7 @@ private def commitBatch(): Unit = {
 }
 ```
 
-Метод [`YtWrapper.insertRows`](yt-wrapper/src/main/scala/tech/ytsaurus/spyt/wrapper/YtWrapper.scala) принимает `Option[ApiServiceTransaction]`: при `Some(tx)` запрос `ModifyRows` направляется через объект транзакции (`tx.modifyRows(request)`), при `None` — через обычный клиент YTsaurus.
+Метод `YtWrapper.insertRows` (листинг А.9) принимает `Option[ApiServiceTransaction]`: при `Some(tx)` запрос `ModifyRows` направляется через объект транзакции (`tx.modifyRows(request)`), при `None` — через обычный клиент YTsaurus.
 
 Батчирование записи сохраняется: строки накапливаются в `ModifyRowsRequest.Builder` до достижения `wConfig.dynBatchSize`, после чего выполняется `commitBatch`. Параметр `dynBatchSize` управляется конфигурацией `spark.yt.write.dynBatchSize` и позволяет регулировать объём одного запроса `modifyRows` в рамках транзакции.
 
@@ -116,9 +116,7 @@ private def commitBatch(): Unit = {
 
 ## 4.6 Декоратор MicroBatchExecution
 
-Декоратор [`MicroBatchExecutionDecorators`](spark-adapter/impl/spark-3.2.2/bin/main/org/apache/spark/sql/execution/streaming/MicroBatchExecutionDecorators.scala:8) подменяет метод `runBatch` класса `MicroBatchExecution` через механизм инструментации байт-кода `spark-patch`. Аннотации `@Decorate` и `@OriginClass` указывают агенту целевой класс и метод для подмены; оригинальный метод остаётся доступным под именем `__runBatch`.
-
-Полный исходный код декоратора приведён в приложении А, листинг А.1.
+Декоратор `MicroBatchExecutionDecorators` (листинг А.4) подменяет метод `runBatch` класса `MicroBatchExecution` через механизм инструментации байт-кода `spark-patch`. Аннотации `@Decorate` и `@OriginClass` указывают агенту целевой класс и метод для подмены; оригинальный метод остаётся доступным под именем `__runBatch`.
 
 При выключенном флаге `spark.yt.streaming.transactional` декоратор прозрачно делегирует вызов оригинальному методу `__runBatch` и не вносит накладных расходов.
 
@@ -142,7 +140,7 @@ private def commitBatch(): Unit = {
 
 ### 4.7.1 Интерфейс StreamingTransactionSupport
 
-Интерфейс [`StreamingTransactionSupport`](spark-adapter/api/src/main/scala/tech/ytsaurus/spyt/adapter/StreamingTransactionSupport.scala:17) объявляет контракт жизненного цикла распределённой транзакции:
+Интерфейс `StreamingTransactionSupport` (листинг А.1) объявляет контракт жизненного цикла распределённой транзакции:
 
 ```scala
 trait StreamingTransactionSupport {
@@ -158,7 +156,7 @@ trait StreamingTransactionSupport {
 }
 ```
 
-Вспомогательный трейт [`StreamingTransactionHandle`](spark-adapter/api/src/main/scala/tech/ytsaurus/spyt/adapter/StreamingTransactionSupport.scala:7) представляет открытую транзакцию:
+Вспомогательный трейт `StreamingTransactionHandle` (там же, листинг А.1) представляет открытую транзакцию:
 
 ```scala
 trait StreamingTransactionHandle {
@@ -182,17 +180,17 @@ object StreamingTransactionSupport {
 
 ### 4.7.2 Реализация YTsaurusStreamingTransactionSupport
 
-Класс [`YTsaurusStreamingTransactionSupport`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/adapter/YTsaurusStreamingTransactionSupport.scala:13) регистрируется в `META-INF/services/tech.ytsaurus.spyt.adapter.StreamingTransactionSupport`.
+Класс `YTsaurusStreamingTransactionSupport` (листинг А.2) регистрируется в `META-INF/services/tech.ytsaurus.spyt.adapter.StreamingTransactionSupport`.
 
-Метод `createTransaction` создаёт таблет-транзакцию с параметром `sticky=true`, что соответствует `TransactionType.Tablet` в клиентской библиотеке YT. Полный исходный код метода приведён в приложении А, листинг А.3.
+Метод `createTransaction` создаёт таблет-транзакцию с параметром `sticky=true`, что соответствует `TransactionType.Tablet` в клиентской библиотеке YT. Полный исходный код класса приведён в листинге А.2.
 
-Класс [`YtStreamingTransactionHandle`](data-source-extended/src/main/scala/tech/ytsaurus/spyt/adapter/YTsaurusStreamingTransactionSupport.scala:49) оборачивает `ApiServiceTransaction`. Адрес rpc-прокси, на которой открыта транзакция, получается через рефлексию — метод `getRpcProxyAddress` не входит в публичный API `ApiServiceTransaction`, поэтому вызывается через `getDeclaredMethods` с `setAccessible(true)`. При недоступности метода (например, в будущих версиях клиентской библиотеки) возвращается `None`, и исполнители используют клиент из общего пула без фиксации на конкретном прокси.
+Класс `YtStreamingTransactionHandle` (там же, листинг А.2) оборачивает `ApiServiceTransaction`. Адрес rpc-прокси, на которой открыта транзакция, получается через рефлексию — метод `getRpcProxyAddress` не входит в публичный API `ApiServiceTransaction`, поэтому вызывается через `getDeclaredMethods` с `setAccessible(true)`. При недоступности метода (например, в будущих версиях клиентской библиотеки) возвращается `None`, и исполнители используют клиент из общего пула без фиксации на конкретном прокси.
 
 Методы `commit` и `abort` делегируют вызовы объекту `ApiServiceTransaction` с блокирующим ожиданием (`join()`). В `abort` перехватывается `IllegalStateException`, возникающий при попытке отменить уже завершённую транзакцию.
 
 ## 4.8 Конфигурация и обратная совместимость
 
-Транзакционный режим управляется конфигурационным параметром `spark.yt.streaming.transactional` (тип `Boolean`, значение по умолчанию `false`). Параметр объявлен в объекте [`SparkYtConfiguration.Streaming`](data-source/src/main/scala/tech/ytsaurus/spyt/format/conf/SparkYtConfiguration.scala:88):
+Транзакционный режим управляется конфигурационным параметром `spark.yt.streaming.transactional` (тип `Boolean`, значение по умолчанию `false`). Параметр объявлен в объекте `SparkYtConfiguration.Streaming` (листинг А.11):
 
 ```scala
 object Streaming {
