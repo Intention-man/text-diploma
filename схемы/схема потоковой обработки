@@ -1,0 +1,19 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#ffffff', 'primaryBorderColor': '#000000', 'primaryTextColor': '#000000', 'lineColor': '#000000', 'signalColor': '#000000', 'signalTextColor': '#000000', 'labelBoxBorderColor': '#000000', 'labelBoxBkgColor': '#ffffff', 'labelTextColor': '#000000', 'loopBkgColor': '#ffffff', 'noteBkgColor': '#ffffff', 'noteTextColor': '#000000', 'noteBorderColor': '#000000'}}}%%
+sequenceDiagram
+    box rgb(230, 240, 255) Apache Spark
+    participant Driver as Драйвер
+    participant Exec as Исполнители
+    end
+
+    box rgb(255, 238, 220) YTsaurus
+    participant YT as Очередь и таблицы
+    end
+
+    YT->>Exec: Чтение строк из очереди
+    Exec->>YT: Запись результатов
+
+    rect rgb(255, 235, 235)
+        Note over Driver, YT: ! СБОЙ — данные записаны, смещение ещё не зафиксировано !
+    end
+
+    Driver->>YT: Фиксация смещения

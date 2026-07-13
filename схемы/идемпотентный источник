@@ -1,0 +1,25 @@
+flowchart TB
+    QUEUE["Очередь YTsaurus"]
+
+    subgraph E1["Исполнитель 1"]
+        PE1["Прокси Б"]
+    end
+
+    subgraph E2["Исполнитель 2"]
+        PE2["Прокси В"]
+    end
+
+    subgraph TABLE["Сортированная динамическая таблица"]
+        KEY["Ключ: путь очереди + индекс таблета + индекс строки"]
+    end
+
+    QUEUE -->|"чтение строк"| E1
+    QUEUE -->|"чтение строк"| E2
+
+    PE1 -->|"upsert — повторная запись\nне создаёт дубликат"| TABLE
+    PE2 -->|"upsert — повторная запись\nне создаёт дубликат"| TABLE
+
+    style PE1 fill:#DBEAFE,stroke:#1D4ED8
+    style PE2 fill:#DBEAFE,stroke:#1D4ED8
+    style KEY fill:#FEF9C3,stroke:#D97706
+    style TABLE fill:#F0FDF4,stroke:#16A34A

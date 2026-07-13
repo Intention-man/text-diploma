@@ -1,0 +1,25 @@
+flowchart TB
+    subgraph PROXY["Прокси"]
+        TX["Транзакция"]
+    end
+
+    SINK["Исполнители"]
+    SRC["Драйвер"]
+
+    subgraph ATOMIC["YTsaurus"]
+        DYN["Выходная\nдинамическая таблица"]
+        CONS["Таблица со\nсмещением"]
+    end
+
+    SINK -->|"записать данные"| TX
+    SRC -->|"обновить смещение"| TX
+    TX --> COMMIT{{"Атомарный коммит"}}
+    COMMIT -->|"данные"| DYN
+    COMMIT -->|"новое смещение"| CONS
+
+    style TX fill:#FEF9C3,stroke:#D97706
+    style COMMIT fill:#DCFCE7,stroke:#16A34A
+    style PROXY fill:#DBEAFE,stroke:#1D4ED8
+    style ATOMIC fill:#FFEDD5,stroke:#F59E0B
+    style DYN fill:#FDBA74,stroke:#EA580C
+    style CONS fill:#FDBA74,stroke:#EA580C

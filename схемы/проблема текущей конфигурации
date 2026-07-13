@@ -1,0 +1,22 @@
+flowchart TB
+    subgraph D["Драйвер"]
+        subgraph PA["Прокси А"]
+            TX["Транзакция"]
+        end
+    end
+
+    subgraph E1["Исполнитель 1"]
+        PB["Прокси Б"]
+    end
+
+    subgraph E2["Исполнитель 2"]
+        PC["Прокси В"]
+    end
+
+    E1 --x|"нет доступа"| PA
+    E2 --x|"нет доступа"| PA
+
+    style PA fill:#DBEAFE,stroke:#1D4ED8
+    style PB fill:#DBEAFE,stroke:#1D4ED8
+    style PC fill:#DBEAFE,stroke:#1D4ED8
+    style TX fill:#FEF9C3,stroke:#D97706

@@ -1,0 +1,18 @@
+flowchart TB
+    QUEUE["Очередь YTsaurus"]
+
+    subgraph E1["Исполнитель"]
+        subgraph PE1["Прокси"]
+            TX["Транзакция"]
+        end
+    end
+
+    DYN["Выходная\nдинамическая таблица"]
+    CONS["Таблица\nсмещений"]
+
+    QUEUE -->|"чтение данных"| E1
+    TX -->|"запись данных"| DYN
+    TX -->|"обновление смещения"| CONS
+
+    style PE1 fill:#DBEAFE,stroke:#1D4ED8
+    style TX fill:#FEF9C3,stroke:#D97706

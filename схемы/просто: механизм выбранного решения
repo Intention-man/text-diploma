@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant D as Драйвер
+    participant E as Исполнители
+    participant P as Прокси
+
+    D->>P: открыть транзакцию
+    E->>P: записать строки
+    D->>P: зафиксировать смещение
+
+    alt Успех
+        D->>P: зафиксировать транзакцию
+    else Сбой
+        D->>P: отменить транзакцию
+    end

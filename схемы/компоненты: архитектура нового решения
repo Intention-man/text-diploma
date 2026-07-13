@@ -1,0 +1,32 @@
+flowchart TB
+    subgraph Driver[JVM драйвера]
+        MBE[MicroBatchExecution.runBatch]
+        DEC[Декоратор runBatch<br/>spark-patch]
+        SPI[YTsaurusStreamingTransactionSupport<br/>data-source-extended]
+        SRC[YtStreamingSource]
+        SINK[YtStreamingSink]
+        TLC[YtStreamingTransactionContext<br/>YtStreamingBatchContext]
+        QUO[YtQueueOffset.advance...]
+    end
+    subgraph Executor[JVM исполнителя]
+        EXR[foreachPartition closure]
+        ATT[attachTransaction<br/>yt-wrapper]
+        MOD[modifyRows]
+    end
+    subgraph Proxy[Прокси общего пула]
+        TX[(sticky tablet-транзакция)]
+    end
+    DEC --> MBE
+    DEC --> SPI
+    SPI --> TLC
+    MBE --> SRC
+    MBE --> SINK
+    SRC --> TLC
+    SINK --> TLC
+    SINK --> EXR
+    SPI --> QUO
+    SPI --> TX
+    QUO --> TX
+    EXR --> ATT
+    ATT --> MOD
+    MOD --> TX
